@@ -1,0 +1,4 @@
+.DS_Store
+data/amazon_books/*
+data/movie_lens_32M/*
+data/netflix_movies/*
