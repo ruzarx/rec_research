@@ -14,6 +14,6 @@ class MatrixFactorization(torch.nn.Module):
     def forward(self, inputs: tuple):
         user_ids, item_ids, _, _ = inputs
         x = torch.sum(self.user_embedding(user_ids) * self.item_embedding(item_ids), dim=-1)
-        x = x + self.user_bias(user_ids).squeeze() * self.item_bias(item_ids).squeeze()
+        x = x + self.user_bias(user_ids).squeeze() + self.item_bias(item_ids).squeeze()
         return self.sigmoid(x)
     

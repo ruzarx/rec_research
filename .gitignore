@@ -2,3 +2,7 @@
 data/amazon_books/*
 data/movie_lens_32M/*
 data/netflix_movies/*
+*.pyc
+*.json
+*.csv
+test.ipynb
