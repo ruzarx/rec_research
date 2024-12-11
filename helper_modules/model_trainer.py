@@ -1,5 +1,6 @@
 
 from typing import List
+import numpy as np
 from collections import namedtuple
 
 import torch
@@ -51,25 +52,27 @@ class ModelTrainer:
                 train_loss += loss.item()
             print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss/len(train_dataloader):.4f}", end=' ')
 
-            self.model.eval()
-            val_loss = 0.0
-            self._reset_metrics()
-            for batch, labels in valid_dataloader:
-                out = self._predict(batch)
-                labels = labels.to(self.device)
-                loss = loss_function(out, labels)
-                val_loss += loss.item()
-                self._update_metrics(out, labels)
-            mean_val_loss = val_loss / len(valid_dataloader)
-            precision_at_5 = self._validate(valid_dataloader, k=5)
-            precision_at_10 = self._validate(valid_dataloader, k=10)
-            print(f"Validation Loss: {mean_val_loss:.4f}, Precision at 5 {precision_at_5:.3f}, Precision at 10 {precision_at_10:.3f}")
-            print(self._repr_metrics())
-            if self._is_early_stop(mean_val_loss):
+            # self.model.eval()
+            # val_loss = 0.0
+            # self._reset_metrics()
+            # for batch, labels in valid_dataloader:
+            #     out = self._predict(batch)
+            #     labels = labels.to(self.device)
+            #     loss = loss_function(out, labels)
+            #     val_loss += loss.item()
+            #     self._update_metrics(out, labels)
+            # mean_val_loss = val_loss / len(valid_dataloader)
+            ndcg_5, ndcg_10 = self.validate(valid_dataloader, k=5)
+            # ndcg_10 = self.validate(valid_dataloader, k=10)
+            # precision_at_5 = self._validate(valid_dataloader, k=5)
+            # precision_at_10 = self._validate(valid_dataloader, k=10)
+            print(f"NDCG at 5 {ndcg_5:.4f}, NDCG at 10 {ndcg_10:.4f}")
+            # print(self._repr_metrics())
+            if self._is_early_stop(ndcg_5):
                 print(f"Validation loss stopped improving. Aborting")
                 break
         print(f"Number of parameters trained {self._get_n_params()}")
-        return precision_at_5
+        return ndcg_5
 
     def _reset_metrics(self):
         for metric in self.metrics:
@@ -107,82 +110,127 @@ class ModelTrainer:
         return n_params
     
     def _is_early_stop(self, current_loss: float) -> bool:
-        if len(self._val_losses) < 2:
+        if len(self._val_losses) <= 2:
             self._val_losses.append(current_loss)
         else:
-            if current_loss > self._val_losses[-1] > self._val_losses[-2]:
+            if current_loss < self._val_losses[-1] < self._val_losses[-2]:
                 return True
-        self._val_losses.append(current_loss)
+            self._val_losses.append(current_loss)
         return False
         
-    def _validate(self, valid_dataloader, k):
-        self.model.eval()  # Set the model to evaluation mode
-        user_ids, game_ids, preds, targets = [], [], [], []
+    def dcg_torch(self, relevance_scores, k):
+        """
+        Calculate Discounted Cumulative Gain (DCG) at K.
+        """
+        relevance_scores = relevance_scores[:k]
+        gains = torch.pow(2, relevance_scores) - 1
+        discounts = torch.log2(torch.arange(1, len(relevance_scores) + 1, dtype=torch.float32) + 1)
+        return torch.sum(gains / discounts)
 
-        with torch.no_grad():  # No gradient computation for validation
+    def ndcg_user_wise_torch(self, predicted, true_relevance, k):
+        """
+        Calculate NDCG@K for each user and average across users.
+        """
+        ndcg_scores = []
+
+        for user in predicted.keys():
+            # Sort true relevance based on predicted order
+            user_predicted_scores = predicted[user]
+            user_true_relevance = true_relevance[user]
+
+            sorted_indices = torch.argsort(user_predicted_scores, descending=True)
+            sorted_true_relevance = user_true_relevance[sorted_indices]
+
+            # Calculate DCG@K
+            dcg = self.dcg_torch(sorted_true_relevance, k)
+
+            # Calculate IDCG@K (ideal ranking)
+            ideal_relevance = torch.sort(user_true_relevance, descending=True).values
+            idcg = self.dcg_torch(ideal_relevance, k)
+
+            # Normalize
+            ndcg = dcg / idcg if idcg > 0 else 0.0
+            ndcg_scores.append(ndcg)
+
+        # Return mean NDCG across all users
+        return torch.mean(torch.tensor(ndcg_scores))
+
+    def validate(self, valid_dataloader, k):
+        """
+        Validate the model and calculate NDCG@K using the validation dataloader.
+        """
+        self.model.eval()  # Set model to evaluation mode
+        predicted = {}
+        true_relevance = {}
+
+        with torch.no_grad():  # No gradients required for validation
             for batch, labels in valid_dataloader:
                 # Unpack the batch
                 user_id, game_id, user_features, game_features = batch
-                
-                # Move data to the specified device
+
+                # Move data to device
                 user_id, game_id = user_id.to(self.device), game_id.to(self.device)
                 user_features, game_features = user_features.to(self.device), game_features.to(self.device)
                 labels = labels.to(self.device)
-                
-                # Forward pass
+
+                # Forward pass to get predictions
                 outputs = self.model(batch)
-                
-                # Accumulate results
-                user_ids.append(user_id)
-                game_ids.append(game_id)
-                preds.append(outputs)
-                targets.append(labels)
 
-        # Concatenate all predictions and targets into tensors
-        user_ids = torch.cat(user_ids)
-        game_ids = torch.cat(game_ids)
-        preds = torch.cat(preds)
-        targets = torch.cat(targets)
+                # Store predictions and true relevance by user
+                for uid, gid, pred, label in zip(user_id, game_id, outputs, labels):
+                    if uid.item() not in predicted:
+                        predicted[uid.item()] = []
+                        true_relevance[uid.item()] = []
+                    predicted[uid.item()].append(pred.item())
+                    true_relevance[uid.item()].append(label.item())
 
-        # Calculate Precision@K
-        mean_precision_at_k = self.precision_at_k_pytorch(user_ids, preds, targets, k)
-        return mean_precision_at_k
+        # Convert lists to tensors for each user
+        for user in predicted.keys():
+            predicted[user] = torch.tensor(predicted[user])
+            true_relevance[user] = torch.tensor(true_relevance[user])
+
+        # Calculate NDCG@K
+        mean_ndcg_5 = self.ndcg_user_wise_torch(predicted, true_relevance, 5)
+        mean_ndcg_10 = self.ndcg_user_wise_torch(predicted, true_relevance, 10)
+        return mean_ndcg_5, mean_ndcg_10
+
     
-    def precision_at_k_pytorch(self, user_ids, preds, targets, k):
-        """
-        Calculate Precision@K in PyTorch.
+    # def precision_at_k_pytorch(self, user_ids, preds, targets, k):
+    #     """
+    #     Calculate Precision@K in PyTorch.
 
-        Args:
-            user_ids (torch.Tensor): Tensor of user IDs (shape: [num_samples]).
-            game_ids (torch.Tensor): Tensor of game IDs (not used for Precision@K but useful for other metrics).
-            preds (torch.Tensor): Tensor of predicted scores (shape: [num_samples]).
-            targets (torch.Tensor): Tensor of binary relevance labels (1 if relevant, 0 otherwise) (shape: [num_samples]).
-            k (int): Number of top predictions to consider for Precision@K.
+    #     Args:
+    #         user_ids (torch.Tensor): Tensor of user IDs (shape: [num_samples]).
+    #         game_ids (torch.Tensor): Tensor of game IDs (not used for Precision@K but useful for other metrics).
+    #         preds (torch.Tensor): Tensor of predicted scores (shape: [num_samples]).
+    #         targets (torch.Tensor): Tensor of binary relevance labels (1 if relevant, 0 otherwise) (shape: [num_samples]).
+    #         k (int): Number of top predictions to consider for Precision@K.
             
-        Returns:
-            float: Mean Precision@K across all users.
-        """
-        # Combine user IDs, predictions, and relevance into a single tensor
-        data = torch.stack((user_ids, preds, targets), dim=1)
+    #     Returns:
+    #         float: Mean Precision@K across all users.
+    #     """
+    #     # Combine user IDs, predictions, and relevance into a single tensor
+    #     data = torch.stack((user_ids, preds, targets), dim=1)
         
-        # Sort by user ID and then by predicted scores in descending order
-        sorted_data = data[data[:, 1].argsort(descending=True)]
-        sorted_data = sorted_data[sorted_data[:, 0].argsort()]
+    #     # Sort by user ID and then by predicted scores in descending order
+    #     sorted_data = data[data[:, 1].argsort(descending=True)]
+    #     sorted_data = sorted_data[sorted_data[:, 0].argsort()]
         
-        # Group data by user
-        unique_users = torch.unique(user_ids)
-        precisions = []
+    #     # Group data by user
+    #     unique_users = torch.unique(user_ids)
+    #     precisions = []
 
-        for user in unique_users:
-            # Extract predictions for the current user
-            user_data = sorted_data[sorted_data[:, 0] == user]
+    #     for user in unique_users:
+    #         # Extract predictions for the current user
+    #         user_data = sorted_data[sorted_data[:, 0] == user]
             
-            # Select the top-K predictions
-            top_k_data = user_data[:k]
+    #         # Select the top-K predictions
+    #         top_k_data = user_data[:k]
             
-            # Calculate Precision@K
-            relevant_items = top_k_data[:, 2].sum().item()  # Sum of relevant items in top-K
-            precisions.append(relevant_items / k)
+    #         # Calculate Precision@K
+    #         relevant_items = top_k_data[:, 2].sum().item()  # Sum of relevant items in top-K
+    #         precisions.append(relevant_items / k)
         
-        # Return mean Precision@K across all users
-        return sum(precisions) / len(precisions)
+    #     # Return mean Precision@K across all users
+    #     return sum(precisions) / len(precisions)
+    

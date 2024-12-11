@@ -3,7 +3,8 @@ from typing import Tuple, List, Dict, Optional
 import json
 import random
 import logging
-from torch.utils.data import DataLoader
+import torch
+from torch.utils.data import DataLoader, Dataset
 import pandas as pd
 
 from helper_modules.dataset_class import RecDataset, FeaturesCounts
@@ -11,6 +12,21 @@ from helper_modules.dataset_class import RecDataset, FeaturesCounts
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+class RecommendationDataset(Dataset):
+    def __init__(self, user_item_pairs, num_items):
+        self.user_item_pairs = user_item_pairs
+        self.num_items = num_items
+
+    def __len__(self):
+        return len(self.user_item_pairs)
+
+    def __getitem__(self, idx):
+        user, pos_item = self.user_item_pairs[idx]
+        neg_item = torch.randint(0, self.num_items, size=(1,)).item()  # Random negative sample
+        return user, pos_item, neg_item
+    
 
 class SteamDataProcessor:
     def __init__(self,
@@ -32,25 +48,43 @@ class SteamDataProcessor:
         self.features_stats = FeaturesCounts()
         return
     
-    def get_dataset(self) -> Tuple[DataLoader, DataLoader]:
+    def get_dataset(self) -> Tuple[DataLoader, DataLoader, DataLoader, FeaturesCounts]:
         data, features_stats = self._prepare_raw_data()
-        train_df, valid_df = self._prepare_train_valid_data(data)
-        train_dataset = RecDataset(train_df,
-                                    self.user_column_name,
-                                    self.item_column_name,
-                                    self.label_column_name,
-                                    features_stats.user_features,
-                                    features_stats.user_features)
-        valid_dataset = RecDataset(valid_df,
-                                    self.user_column_name,
-                                    self.item_column_name,
-                                    self.label_column_name,
-                                    features_stats.user_features,
-                                    features_stats.user_features)
+        train_df, valid_df, test_df = self._prepare_train_valid_data(data)
+        num_items = data['game'].nunique()
+        train_user_item_pairs = []
+        for _, user, item in train_df[train_df['hours'] == 1][['user', 'game']].itertuples():
+            train_user_item_pairs.append((user, item))
+        print(f"N train interactions {len(train_user_item_pairs)}")
+        valid_user_item_pairs = []
+        for _, user, item in valid_df[valid_df['hours'] == 1][['user', 'game']].itertuples():
+            valid_user_item_pairs.append((user, item))
+        print(f"N valid interactions {len(valid_user_item_pairs)}")
+        test_user_item_pairs = []
+        for _, user, item in test_df[test_df['hours'] == 1][['user', 'game']].itertuples():
+            test_user_item_pairs.append((user, item))
+        print(f"N test interactions {len(test_user_item_pairs)}")
+        train_dataset = RecommendationDataset(train_user_item_pairs, num_items)
+        valid_dataset = RecommendationDataset(valid_user_item_pairs, num_items)
+        test_dataset = RecommendationDataset(test_user_item_pairs, num_items)
+        # dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
+        # train_dataset = RecDataset(train_df,
+        #                             self.user_column_name,
+        #                             self.item_column_name,
+        #                             self.label_column_name,
+        #                             features_stats.user_features,
+        #                             features_stats.user_features)
+        # valid_dataset = RecDataset(valid_df,
+        #                             self.user_column_name,
+        #                             self.item_column_name,
+        #                             self.label_column_name,
+        #                             features_stats.user_features,
+        #                             features_stats.user_features)
         train_dataloader = RecDataset.get_data_loader(train_dataset, self.batch_size)
         valid_dataloader = RecDataset.get_data_loader(valid_dataset, self.batch_size)
-        logging.info(f"Created dataloaders for train {len(train_dataloader)} and validation {len(valid_dataloader)}")
-        return train_dataloader, valid_dataloader, features_stats
+        test_dataloader = RecDataset.get_data_loader(test_dataset, self.batch_size)
+        logging.info(f"Created dataloaders for train {len(train_dataloader)}, validation {len(valid_dataloader)}, test {len(test_dataloader)}")
+        return train_dataloader, valid_dataloader, test_dataloader, features_stats
     
     def _prepare_raw_data(self) -> Tuple[pd.DataFrame, FeaturesCounts]:
         df = self._load_raw_data()
@@ -70,11 +104,11 @@ class SteamDataProcessor:
         return df, features_stats
     
     def _prepare_train_valid_data(self, data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        train_df, valid_df = self._split_train_valid(data)
-        train_df, valid_df, normalization_values = self._normalize_features(train_df, valid_df)
+        train_df, valid_df, test_df = self._split_train_valid(data)
+        train_df, valid_df, test_df, normalization_values = self._normalize_features(train_df, valid_df, test_df)
         logging.info(f"Split data into train {train_df.shape} and validation {valid_df.shape}")
         self._store_encoding_data(normalization_values, 'normalization')
-        return train_df, valid_df
+        return train_df, valid_df, test_df
 
     def _load_raw_data(self) -> pd.DataFrame:
         file_path = self.data_path + self.data_file_name
@@ -190,13 +224,18 @@ class SteamDataProcessor:
     def _define_validation(self, data: pd.DataFrame) -> pd.DataFrame:
         data['n_event'] = data.groupby('user', as_index=False).cumcount() + 1
         data['is_valid'] = False
+        data['is_test'] = False
         data.loc[
             data[data['action'] == 'purchase'].sort_values(['user', 'n_event']).groupby('user').tail(3).index,
             'is_valid'] = True
+        data.loc[
+            data[(data['action'] == 'purchase') & (data['is_valid'] == False)].sort_values(['user', 'n_event']).groupby('user').tail(3).index,
+            'is_test'] = True
         data = data.drop(columns='n_event')
         logging.info(f"Added validation colums. "
+                     f" Train samples {data[(data['is_valid'] == False) & (data['is_test'] == False)].shape[0]}"
                      f" Validation samples {data[data['is_valid'] == True].shape[0]}"
-                     f" Train samples {data[data['is_valid'] == False].shape[0]}"
+                     f" Test samples {data[data['is_test'] == True].shape[0]}"
                      )
         return data
 
@@ -220,13 +259,14 @@ class SteamDataProcessor:
                 val_pair_games.append(game_candidate)
 
         negative_val_sample = pd.DataFrame({'user': val_pair_users, 'game': val_pair_games})
-        negative_val_sample['is_valid'] = True
+        negative_val_sample['is_valid'] = False
+        negative_val_sample['is_test'] = True
         negative_val_sample['action'] = 'purchase'
         negative_val_sample['hours'] = 0
         data = pd.concat([data, negative_val_sample])
         logging.info(f"Added negative samples {self.neg_sample_multiplier} per user. Resulting shape {data.shape[0]}")
         logging.info(f"Validation proportion: 1 - {data[(data['is_valid'] == True) & (data['hours'] == 1)].shape[0]}, \
-                      1 - {data[(data['is_valid'] == True) & (data['hours'] == 0)].shape[0]}")
+                      0 - {data[(data['is_valid'] == True) & (data['hours'] == 0)].shape[0]}")
         return data
     
     def _get_entity_columns_names(self, data: pd.DataFrame) -> List[str]:
@@ -250,15 +290,17 @@ class SteamDataProcessor:
         return data
     
     def _split_train_valid(self, data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        train_df = data[data['is_valid'] == False].reset_index(drop=True).drop(columns='is_valid')
-        valid_df = data[data['is_valid'] == True].reset_index(drop=True).drop(columns='is_valid')
-        return train_df, valid_df
+        train_df = data[(data['is_valid'] == False) & (data['is_test'] == False)].reset_index(drop=True).drop(columns=['is_valid', 'is_test'])
+        valid_df = data[data['is_valid'] == True].reset_index(drop=True).drop(columns=['is_valid', 'is_test'])
+        test_df = data[data['is_test'] == True].reset_index(drop=True).drop(columns=['is_valid', 'is_test'])
+        return train_df, valid_df, test_df
 
     def _normalize_features(self,
                             train_df: pd.DataFrame,
-                            valid_df: pd.DataFrame
+                            valid_df: pd.DataFrame,
+                            test_df: pd.DataFrame,
                             ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Tuple[float, float]]]:
-        features_to_std = [col for col in train_df.columns if col not in ['user', 'game', 'hours', 'action', 'is_valid']]
+        features_to_std = [col for col in train_df.columns if col not in ['user', 'game', 'hours', 'action', 'is_valid', 'is_test']]
         normalization_values = dict()
         for col in features_to_std:
             if col in train_df.columns:
@@ -266,8 +308,9 @@ class SteamDataProcessor:
                 mean = train_df[col].mean()
                 train_df[col] = (train_df[col] - mean) / std
                 valid_df[col] = (valid_df[col] - mean) / std
+                test_df[col] = (test_df[col] - mean) / std
                 normalization_values[col] = (std, mean)
-        return train_df, valid_df, normalization_values
+        return train_df, valid_df, test_df, normalization_values
     
     def _store_encoding_data(self, values: dict, name: str) -> None:
         with open(f"{self.data_path}{name}.json", 'w') as file:
