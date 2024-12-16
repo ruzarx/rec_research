@@ -32,14 +32,29 @@ class MatrixFactorizationBPR(torch.nn.Module):
         user_emb = self.user_embedding(user)
         pos_item_emb = self.item_embedding(pos_item)
         neg_item_emb = self.item_embedding(neg_item)
+
+        user_emb = F.normalize(user_emb, p=2, dim=1)
+        pos_item_emb = F.normalize(pos_item_emb, p=2, dim=1)
+        neg_item_emb = F.normalize(neg_item_emb, p=2, dim=1)
+
         user_bias = self.user_bias(user).squeeze()
         pos_item_bias = self.item_bias(pos_item).squeeze()
         neg_item_bias = self.item_bias(neg_item).squeeze()
         return user_emb, pos_item_emb, neg_item_emb, user_bias, pos_item_bias, neg_item_bias
 
 
+# def bpr_loss(user_emb, pos_item_emb, neg_item_emb, user_bias, pos_item_bias, neg_item_bias):
+#     pos_scores = (user_emb * pos_item_emb).sum(dim=1) + user_bias + pos_item_bias
+#     neg_scores = (user_emb * neg_item_emb).sum(dim=1) + user_bias + neg_item_bias
+#     loss = -F.logsigmoid(pos_scores - neg_scores).mean()
+#     return loss
+
 def bpr_loss(user_emb, pos_item_emb, neg_item_emb, user_bias, pos_item_bias, neg_item_bias):
-    pos_scores = (user_emb * pos_item_emb).sum(dim=1) + user_bias + pos_item_bias
-    neg_scores = (user_emb * neg_item_emb).sum(dim=1) + user_bias + neg_item_bias
-    loss = -F.logsigmoid(pos_scores - neg_scores).mean()
+    # Compute scores for positive and negative items
+    pos_scores = torch.einsum('ij,ij->i', user_emb, pos_item_emb) + user_bias.squeeze() + pos_item_bias.squeeze()
+    neg_scores = torch.einsum('ij,ij->i', user_emb, neg_item_emb) + user_bias.squeeze() + neg_item_bias.squeeze()
+    
+    # Compute BPR loss
+    margin = pos_scores - neg_scores
+    loss = -F.logsigmoid(margin).mean()
     return loss
