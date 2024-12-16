@@ -2,6 +2,8 @@
 from typing import Tuple, Dict
 
 import torch
+from tqdm import tqdm
+from time import time
 from torch.utils.data import DataLoader
 
 from helper_modules.metrics import NDCGMetric
@@ -18,22 +20,21 @@ class ModelTrainer:
         for epoch in range(num_epochs):
             self.model.train()
             train_loss = 0
-            for user, pos_item, neg_item in train_dataloader:
+            for user, pos_item, neg_item in tqdm(train_dataloader):
                 user = user.to(self.device)
                 pos_item = pos_item.to(self.device)
                 neg_item = neg_item.to(self.device)
 
                 output = self.model(user, pos_item, neg_item)
-                loss = loss_function(*output)
 
+                loss = loss_function(*output)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-
                 train_loss += loss.item()
+            print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss/len(train_dataloader):.4f}")
             ndcg_5, ndcg_10 = self.validate(valid_dataloader)
-            print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss/len(train_dataloader):.4f}",
-                  f"NDCG at 5 {ndcg_5:.4f}, NDCG at 10 {ndcg_10:.4f}")
+            print(f"NDCG at 5 {ndcg_5:.4f}, NDCG at 10 {ndcg_10:.4f}")
             if self._is_early_stop(ndcg_5):
                 print(f"Validation loss stopped improving. Aborting")
                 break
@@ -80,7 +81,7 @@ class ModelTrainer:
                 x = x + pos_item_bias + user_bias
                 preds = self.model.sigmoid(x)
 
-                for uid, pred in zip(user, preds):
+                for uid, pred in zip(user.cpu(), preds.cpu()):
                     uid = uid.item()
                     if uid not in predicted:
                         predicted[uid] = []
@@ -99,11 +100,12 @@ class ModelTrainer:
                     x = x + neg_item_bias + user_bias
                     preds = self.model.sigmoid(x)
 
-                    for uid, pred in zip(user, preds):
+                    for uid, pred in zip(user.cpu(), preds.cpu()):
                         uid = uid.item()
                         if uid not in predicted:
                             predicted[uid] = []
                             true_relevance[uid] = []
                         predicted[uid].append(pred)
                         true_relevance[uid].append(0)
+        
         return predicted, true_relevance

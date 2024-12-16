@@ -17,6 +17,7 @@ class SteamDataProcessorClean:
                  batch_size: int,
                  min_user_interactions: int,
                  min_game_interactions: int,
+                 n_valid_sample: int,
                  ):
         self.data_path = f"data/steam_games/"
         self.data_file_name = "steam-200k.csv"
@@ -24,6 +25,7 @@ class SteamDataProcessorClean:
         self.user_column_name = 'user'
         self.item_column_name = 'game'
         self.label_column_name = 'hours'
+        self.n_valid_sample = n_valid_sample
         self.min_user_interactions = min_user_interactions
         self.min_game_interactions = min_game_interactions
         self.features_stats = FeaturesCounts()
@@ -124,10 +126,14 @@ class SteamDataProcessorClean:
         data['is_valid'] = False
         data['is_test'] = False
         data.loc[
-            data[data['action'] == 'purchase'].sort_values(['user', 'n_event']).groupby('user').tail(3).index,
+            data[data['action'] == 'purchase'].sort_values(
+                ['user', 'n_event']
+                ).groupby('user').tail(self.n_valid_sample).index,
             'is_valid'] = True
         data.loc[
-            data[(data['action'] == 'purchase') & (data['is_valid'] == False)].sort_values(['user', 'n_event']).groupby('user').tail(3).index,
+            data[(data['action'] == 'purchase') & (data['is_valid'] == False)].sort_values(
+                ['user', 'n_event']
+                ).groupby('user').tail(self.n_valid_sample).index,
             'is_test'] = True
         data = data.drop(columns='n_event')
         logging.info(f"Added validation colums. "

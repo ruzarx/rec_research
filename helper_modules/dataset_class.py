@@ -21,16 +21,18 @@ class FeaturesCounts:
 
 
 class BPRDataset(Dataset):
-    def __init__(self, user_item_pairs, num_items):
-        self.user_item_pairs = user_item_pairs
+    def __init__(self, pos_user_item_pairs, neg_user_item_pairs, num_items):
+        self.pos_user_item_pairs = pos_user_item_pairs
+        self.neg_user_item_pairs = neg_user_item_pairs
         self.num_items = num_items
 
     def __len__(self):
-        return len(self.user_item_pairs)
+        return len(self.pos_user_item_pairs)
 
     def __getitem__(self, idx):
-        user, pos_item = self.user_item_pairs[idx]
-        neg_item = torch.randint(0, self.num_items, size=(1,)).item()  # Random negative sample
+        user, pos_item = self.pos_user_item_pairs[idx]
+        neg_item_idx = torch.randint(0, self.neg_user_item_pairs[user].shape[0], size=(1,)).item()  # Random negative sample
+        neg_item = self.neg_user_item_pairs[user][neg_item_idx]
         return user, pos_item, neg_item
     
     @staticmethod
@@ -38,7 +40,8 @@ class BPRDataset(Dataset):
         dataloader = DataLoader(
             dataset=dataset,
             batch_size=batch_size,
-            shuffle=True
+            shuffle=True,
+            # num_workers=4,
         )
         return dataloader
     
